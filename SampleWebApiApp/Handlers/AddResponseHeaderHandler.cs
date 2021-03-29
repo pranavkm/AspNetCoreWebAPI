@@ -10,7 +10,7 @@ namespace SampleWebApiApp.Handlers
             HttpRequestMessage request, CancellationToken cancellationToken)
         {
             var response = await base.SendAsync(request, cancellationToken);
-            response.Headers.TryAddWithoutValidation("X-TestHeader", "test-value");
+            response.Headers.TryAddWithoutValidation("X-ResponseHeader", "Header from WebAPI");
 
             return response;
         }

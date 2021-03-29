@@ -76,22 +76,10 @@ namespace System.Web.Http.AspNetCore
 
             if (bufferInput)
             {
-                httpContext.Request.EnableBuffering();
+                throw new NotSupportedException("Request buffering is not supported by ths host. Consider using HttpRequest.EnableBuffering in a middleware instead.");
             }
 
-            HttpContent requestContent;
-            if (!httpRequest.Body.CanSeek && bufferInput)
-            {
-                requestContent = await CreateBufferedRequestContentAsync(httpRequest, cancellationToken);
-            }
-            else
-            {
-                requestContent = CreateStreamedRequestContent(httpRequest);
-            }
-
-            HttpRequestMessage request = CreateRequestMessage(httpContext, requestContent);
-            MapRequestProperties(request, httpContext);
-
+            var request = httpContext.ToHttpRequestMessage();
             SetPrincipal(httpContext.User);
 
             HttpResponseMessage response = null;
@@ -156,95 +144,6 @@ namespace System.Web.Http.AspNetCore
             {
                 await _next(httpContext);
             }
-        }
-
-        private static HttpContent CreateStreamedRequestContent(HttpRequest httpRequest)
-        {
-            // Note that we must NOT dispose httpRequest.Body in this case. Disposing it would close the input
-            // stream and prevent cascaded components from accessing it. The server MUST handle any necessary
-            // cleanup upon request completion. NonOwnedStream prevents StreamContent (or its callers including
-            // HttpRequestMessage) from calling Close or Dispose on httpRequest.Body.
-            return new StreamContent(new NonDisposableStream(httpRequest.Body));
-        }
-
-        private static async Task<HttpContent> CreateBufferedRequestContentAsync(HttpRequest httpRequest,
-            CancellationToken cancellationToken)
-        {
-            // We need to replace the request body with a buffered stream so that other components can read the stream.
-            // For this stream to be useful, it must NOT be diposed along with the request. Streams created by
-            // StreamContent do get disposed along with the request, so use MemoryStream to buffer separately.
-            MemoryStream buffer;
-            var contentLength = httpRequest.ContentLength;
-
-            if (!contentLength.HasValue)
-            {
-                buffer = new MemoryStream();
-            }
-            else
-            {
-                buffer = new MemoryStream((int)contentLength.Value);
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-
-            using (StreamContent copier = new StreamContent(httpRequest.Body))
-            {
-                await copier.CopyToAsync(buffer);
-            }
-
-            // Provide the non-disposing, buffered stream to later ASP.NET Core components (set to the stream's beginning).
-            buffer.Position = 0;
-            httpRequest.Body = buffer;
-
-            // For MemoryStream, Length is guaranteed to be an int.
-            return new ByteArrayContent(buffer.GetBuffer(), 0, (int)buffer.Length);
-        }
-
-        private static HttpRequestMessage CreateRequestMessage(HttpContext httpContext, HttpContent requestContent)
-        {
-            // Create the request
-            var httpRequest = httpContext.Request;
-            var uriBuilder = new UriBuilder
-            {
-                Scheme = httpRequest.Scheme,
-                Host = httpRequest.Host.Host,
-                Port = httpRequest.Host.Port.GetValueOrDefault(80),
-                Path = httpRequest.PathBase.Add(httpRequest.Path),
-                Query = httpRequest.QueryString.Value
-            };
-            HttpRequestMessage request = new HttpRequestMessage(new HttpMethod(httpRequest.Method), uriBuilder.Uri);
-
-            try
-            {
-                // Set the body
-                request.Content = requestContent;
-
-                // Copy the headers
-                foreach (var (key, value) in httpRequest.Headers)
-                {
-                    if (!request.Headers.TryAddWithoutValidation(key, (ICollection<string>)value))
-                    {
-                        requestContent.Headers.TryAddWithoutValidation(key, (ICollection<string>)value);
-                    }
-                }
-            }
-            catch
-            {
-                request.Dispose();
-                throw;
-            }
-
-            return request;
-        }
-
-        private static void MapRequestProperties(HttpRequestMessage request, HttpContext context)
-        {
-            // Set the ASP.NET Core context on the request
-            request.SetHttpContext(context);
-
-            // Set a request context on the request that lazily populates each property.
-            HttpRequestContext requestContext = new AspNetCoreHttpRequestContext(context, request);
-            request.SetRequestContext(requestContext);
         }
 
         private static void SetPrincipal(IPrincipal user)

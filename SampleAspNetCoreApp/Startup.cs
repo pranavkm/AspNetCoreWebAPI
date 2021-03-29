@@ -14,6 +14,7 @@ namespace AspNetCoreApp
         // For more information on how to configure your application, visit https://go.microsoft.com/fwlink/?LinkID=398940
         public void ConfigureServices(IServiceCollection services)
         {
+            services.AddWebApi();
         }
 
         // This method gets called by the runtime. Use this method to configure the HTTP request pipeline.
@@ -27,6 +28,15 @@ namespace AspNetCoreApp
             // Configure Web API for self-host. 
             HttpConfiguration config = new HttpConfiguration();
             WebApiConfig.Register(config);
+
+            config.MessageHandlers.Insert(1, new MiddlewareDelegatingHandler(app =>
+            {
+                app.Use((context, next) =>
+                {
+                    context.Response.Headers["X-AspNetCoreHeader"] = "Value From ASP.NET Core";
+                    return next();
+                });
+            }));
 
             app.UseWebApi(config);
         }
