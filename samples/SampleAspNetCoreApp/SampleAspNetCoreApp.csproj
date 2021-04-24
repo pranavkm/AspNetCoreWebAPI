@@ -5,7 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\AspnetCoreHost\System.Web.Http.AspNetCore.csproj" />
+    <ProjectReference Include="..\..\src\System.Web.Http.AspNetCore\System.Web.Http.AspNetCore.csproj" />
     <ProjectReference Include="..\SampleWebApiApp\SampleWebApiApp.csproj" />
   </ItemGroup>
 

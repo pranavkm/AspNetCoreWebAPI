@@ -1,10 +1,14 @@
 ﻿// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.WebUtilities;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Primitives;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Contracts;
-using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -13,13 +17,8 @@ using System.Runtime.ExceptionServices;
 using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Web.Http.Controllers;
 using System.Web.Http.ExceptionHandling;
 using System.Web.Http.Hosting;
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Http.Features;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Primitives;
 
 namespace System.Web.Http.AspNetCore
 {
@@ -44,7 +43,7 @@ namespace System.Web.Http.AspNetCore
             _next = next;
             _messageHandler = options.MessageHandler ?? throw new ArgumentNullException(nameof(options.MessageHandler));
             _messageInvoker = new HttpMessageInvoker(_messageHandler);
-            _bufferPolicySelector = options.BufferPolicySelector ?? new AspNetCoreBufferPolicySelector();
+            _bufferPolicySelector = options.BufferPolicySelector ?? throw new ArgumentNullException(nameof(options.BufferPolicySelector));
 
             _exceptionLogger = options.ExceptionLogger;
             _exceptionHandler = options.ExceptionHandler;
@@ -62,21 +61,19 @@ namespace System.Web.Http.AspNetCore
                 throw new ArgumentNullException("context");
             }
 
-            var syncIOFeature = httpContext.Features.Get<IHttpBodyControlFeature>();
-            if (syncIOFeature != null)
-            {
-                syncIOFeature.AllowSynchronousIO = true;
-            }
-
             CancellationToken cancellationToken = httpContext.RequestAborted;
             var httpRequest = httpContext.Request;
             var httpResponse = httpContext.Response;
 
-            bool bufferInput = _bufferPolicySelector.UseBufferedInputStream(hostContext: httpContext);
-
+            var bufferInput = _bufferPolicySelector.UseBufferedInputStream(hostContext: httpContext);
+            
             if (bufferInput)
             {
-                throw new NotSupportedException("Request buffering is not supported by ths host. Consider using HttpRequest.EnableBuffering in a middleware instead.");
+                if (!httpRequest.Body.CanSeek)
+                {
+                    httpRequest.EnableBuffering();
+                    await httpRequest.Body.DrainAsync(cancellationToken);
+                }
             }
 
             var request = httpContext.ToHttpRequestMessage();
@@ -92,7 +89,7 @@ namespace System.Web.Http.AspNetCore
                 // Handle null responses
                 if (response == null)
                 {
-                    throw new InvalidOperationException("SendAsync returned null HttpResponseMessage.");
+                    throw new InvalidOperationException("The message handler did not return a response message.");
                 }
 
                 // Handle soft 404s where no route matched - call the next component
@@ -107,12 +104,11 @@ namespace System.Web.Http.AspNetCore
                     // Compute Content-Length before calling UseBufferedOutputStream because the default implementation
                     // accesses that header and we want to catch any exceptions calling TryComputeLength here.
 
-                    if (response.Content == null
-                        || await ComputeContentLengthAsync(request, response, httpResponse, cancellationToken))
+                    if (response.Content == null || await ComputeContentLengthAsync(request, response, httpResponse, cancellationToken))
                     {
-                        bool bufferOutput = _bufferPolicySelector.UseBufferedOutputStream(response);
+                        var bufferOutput = _bufferPolicySelector.UseBufferedOutputStream(response);
 
-                        if (bufferOutput)
+                        if (!bufferOutput)
                         {
                             var responseBodyFeature = httpContext.Features.Get<IHttpResponseBodyFeature>();
                             responseBodyFeature?.DisableBuffering();
@@ -244,12 +240,10 @@ namespace System.Web.Http.AspNetCore
         }
 
         // Prepares Content-Length and Transfer-Encoding headers.
-        private Task<bool> PrepareHeadersAsync(HttpRequestMessage request, HttpResponseMessage response,
+        private ValueTask<bool> PrepareHeadersAsync(HttpRequestMessage request, HttpResponseMessage response,
             HttpResponse httpResponse, CancellationToken cancellationToken)
         {
-            Contract.Assert(response != null);
             HttpResponseHeaders responseHeaders = response.Headers;
-            Contract.Assert(responseHeaders != null);
             HttpContent content = response.Content;
             bool isTransferEncodingChunked = responseHeaders.TransferEncodingChunked == true;
             HttpHeaderValueCollection<TransferCodingHeaderValue> transferEncoding = responseHeaders.TransferEncoding;
@@ -289,19 +283,14 @@ namespace System.Web.Http.AspNetCore
                 transferEncoding.Clear();
             }
 
-            return Task.FromResult(true);
+            return new ValueTask<bool>(true);
         }
 
-        private Task<bool> ComputeContentLengthAsync(HttpRequestMessage request, HttpResponseMessage response,
+        private ValueTask<bool> ComputeContentLengthAsync(HttpRequestMessage request, HttpResponseMessage response,
             HttpResponse httpResponse, CancellationToken cancellationToken)
         {
-            Contract.Assert(response != null);
-            HttpResponseHeaders responseHeaders = response.Headers;
-            Contract.Assert(responseHeaders != null);
             HttpContent content = response.Content;
-            Contract.Assert(content != null);
             HttpContentHeaders contentHeaders = content.Headers;
-            Contract.Assert(contentHeaders != null);
 
             Exception exception;
 
@@ -309,7 +298,7 @@ namespace System.Web.Http.AspNetCore
             {
                 var unused = contentHeaders.ContentLength;
 
-                return Task.FromResult(true);
+                return new ValueTask<bool>(true);
             }
             catch (Exception ex)
             {
@@ -319,7 +308,7 @@ namespace System.Web.Http.AspNetCore
             return HandleTryComputeLengthExceptionAsync(exception, request, response, httpResponse, cancellationToken);
         }
 
-        private async Task<bool> HandleTryComputeLengthExceptionAsync(Exception exception, HttpRequestMessage request,
+        private async ValueTask<bool> HandleTryComputeLengthExceptionAsync(Exception exception, HttpRequestMessage request,
             HttpResponseMessage response, HttpResponse httpResponse, CancellationToken cancellationToken)
         {
             Contract.Assert(httpResponse != null);
@@ -380,7 +369,6 @@ namespace System.Web.Http.AspNetCore
         private async Task SendResponseContentAsync(HttpRequestMessage request, HttpResponseMessage response,
             HttpContext httpContext, CancellationToken cancellationToken)
         {
-            Exception exception;
             cancellationToken.ThrowIfCancellationRequested();
             var httpResponse = httpContext.Response;
             try
@@ -395,16 +383,14 @@ namespace System.Web.Http.AspNetCore
             }
             catch (Exception ex)
             {
-                exception = ex;
+                // We're streaming content, so we can only call loggers, not handlers, as we've already (possibly) send the
+                // status code and headers across the wire. Log the exception.
+                ExceptionContext exceptionContext = new ExceptionContext(ex,
+                    AspNetCoreExceptionCatchBlocks.HttpMessageHandlerAdapterStreamContent, request, response);
+                await _exceptionLogger.LogAsync(exceptionContext, cancellationToken);
+
+                throw;
             }
-
-            // We're streaming content, so we can only call loggers, not handlers, as we've already (possibly) send the
-            // status code and headers across the wire. Log the exception, but then just abort.
-            ExceptionContext exceptionContext = new ExceptionContext(exception,
-                AspNetCoreExceptionCatchBlocks.HttpMessageHandlerAdapterStreamContent, request, response);
-            await _exceptionLogger.LogAsync(exceptionContext, cancellationToken);
-
-            httpContext.Abort();
         }
 
         /// <summary>

@@ -20,7 +20,7 @@ namespace System.Web.Http.AspNetCore
         /// Gets or sets the <see cref="IHostBufferPolicySelector"/> that determines whether or not to buffer requests
         /// and responses.
         /// </summary>
-        public IHostBufferPolicySelector BufferPolicySelector { get; set; } = new AspNetCoreBufferPolicySelector();
+        public IHostBufferPolicySelector BufferPolicySelector { get; set; } = new AspNetCoreBufferPolicySelector(bufferRequests: true);
 
         /// <summary>Gets or sets the <see cref="IExceptionLogger"/> to use to log unhandled exceptions.</summary>
         public IExceptionLogger ExceptionLogger { get; set; } = new EmptyExceptionLogger();

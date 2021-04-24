@@ -3,9 +3,12 @@
 This is a sample project that demonstrates hosting a WebAPI 2 app on ASP.NET Core.
 
 #### Structure:
-* AspnetCoreHost - An ASP.NET Core middleware to execute WebAPI
-* SampleWebApiApp - A netstandard library containing WebApi controllers, filters, and handlers.
-* SampleAspNetCoreApp - A net5.0 ASP.NET Core app that hosts the WebAPI middleware.
+* src
+  * System.Web.Http.AspNetCore - An ASP.NET Core middleware to execute WebAPI
+  * System.Text.Json.Formatter - A MediaTypeFormatter based on System.Text.Json
+* samples
+  * SampleWebApiApp - A netstandard library containing WebApi controllers, filters, and handlers.
+  * SampleAspNetCoreApp - A net5.0 ASP.NET Core app that hosts the WebAPI middleware.
 
 #### Running the app:
 

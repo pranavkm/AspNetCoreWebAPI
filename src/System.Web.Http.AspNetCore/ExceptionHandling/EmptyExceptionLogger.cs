@@ -7,7 +7,7 @@ using System.Web.Http.ExceptionHandling;
 
 namespace System.Web.Http.AspNetCore.ExceptionHandling
 {
-    internal class EmptyExceptionLogger : IExceptionLogger
+    public sealed class EmptyExceptionLogger : IExceptionLogger
     {
         public Task LogAsync(ExceptionLoggerContext context, CancellationToken cancellationToken)
         {

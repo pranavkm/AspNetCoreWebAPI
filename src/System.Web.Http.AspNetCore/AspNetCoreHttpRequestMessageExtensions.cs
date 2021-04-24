@@ -30,7 +30,7 @@ namespace System.Net.Http
 
                 if (httpContext.Request.Body.GetHashCode() != stashedValue.OriginalBodyHash)
                 {
-                    throw new NotSupportedException("Changing the body once it has been initialized is currently not supported.");
+                    throw new NotSupportedException("Changing the body once it has been initialized is not supported.");
                 }
 
                 requestContent = stashedValue.HttpContent;

@@ -12,6 +12,8 @@ using System.Web.Http.Controllers;
 using System.Web.Http.Routing;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 
 namespace System.Web.Http.AspNetCore
 {
@@ -133,12 +135,11 @@ namespace System.Web.Http.AspNetCore
             {
                 if (!_isLocalSet)
                 {
-                    // Based on https://stackoverflow.com/a/44775206
-                    _isLocal = _context.Connection.RemoteIpAddress.Equals(_context.Connection.LocalIpAddress) ||
-                        IPAddress.IsLoopback(_context.Connection.RemoteIpAddress);
-                    _isLocalSet = true;
+                    var hostEnvironment = Context.RequestServices.GetRequiredService<IHostEnvironment>();
+                    _isLocal = hostEnvironment.IsDevelopment();
                 }
 
+                _isLocalSet = true;
                 return _isLocal;
             }
             set

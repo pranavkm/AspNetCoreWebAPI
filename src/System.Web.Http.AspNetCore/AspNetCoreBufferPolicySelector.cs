@@ -7,14 +7,18 @@ using System.Web.Http.Hosting;
 namespace System.Web.Http.AspNetCore
 {
     /// <summary>
-    /// Provides the default implementation of <see cref="IHostBufferPolicySelector"/> used by the OWIN Web API adapter.
+    /// Provides the default implementation of <see cref="IHostBufferPolicySelector"/> used by the ASP.NET Core Web API adapter.
     /// </summary>
     public class AspNetCoreBufferPolicySelector : IHostBufferPolicySelector
     {
+        private readonly bool _bufferRequests;
+
+        public AspNetCoreBufferPolicySelector(bool bufferRequests) => _bufferRequests = bufferRequests;
+
         /// <inheritdoc />
         public bool UseBufferedInputStream(object hostContext)
         {
-            return false;
+            return _bufferRequests;
         }
 
         /// <inheritdoc />
@@ -29,13 +33,6 @@ namespace System.Web.Http.AspNetCore
             // Any HttpContent that knows its length is presumably already buffered internally.
             long? contentLength = content.Headers.ContentLength;
             if (contentLength.HasValue && contentLength.Value >= 0)
-            {
-                return false;
-            }
-
-            // If the response is meant to use chunked transfer encoding, don't buffer.
-            bool? transferEncodingChunked = response.Headers.TransferEncodingChunked;
-            if (transferEncodingChunked.HasValue && transferEncodingChunked.Value)
             {
                 return false;
             }

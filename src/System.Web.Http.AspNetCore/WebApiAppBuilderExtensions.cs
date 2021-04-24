@@ -16,14 +16,16 @@ namespace System.Web.Http.AspNetCore
     [EditorBrowsable(EditorBrowsableState.Never)]
     public static class WebApiAppBuilderExtensions
     {
-        private static readonly IHostBufferPolicySelector _defaultBufferPolicySelector =
-            new AspNetCoreBufferPolicySelector();
-
         /// <summary>Adds a component to the OWIN pipeline for running a Web API endpoint.</summary>
         /// <param name="builder">The application builder.</param>
         /// <param name="configuration">The <see cref="HttpConfiguration"/> used to configure the endpoint.</param>
+        /// <param name="bufferRequests">
+        /// The default WebAPI formatters perform synchronous I/O when reading to the request. 
+        /// This has poor performance characteristics with ASP.NET Core apps and may result
+        /// in application deadlocks. This option forces ASP.NET Core to buffer requests preventing this scenario.
+        /// </param>
         /// <returns>The application builder.</returns>
-        public static IApplicationBuilder UseWebApi(this IApplicationBuilder builder, HttpConfiguration configuration)
+        public static IApplicationBuilder UseWebApi(this IApplicationBuilder builder, HttpConfiguration configuration, bool bufferRequests = true)
         {
             if (builder == null)
             {
@@ -39,7 +41,7 @@ namespace System.Web.Http.AspNetCore
 
             try
             {
-                HttpMessageHandlerOptions options = CreateOptions(builder, server, configuration);
+                HttpMessageHandlerOptions options = CreateOptions(builder, server, configuration, bufferRequests);
                 return UseMessageHandler(builder, options);
             }
             catch
@@ -52,8 +54,13 @@ namespace System.Web.Http.AspNetCore
         /// <summary>Adds a component to the OWIN pipeline for running a Web API endpoint.</summary>
         /// <param name="builder">The application builder.</param>
         /// <param name="httpServer">The http server.</param>
+        /// <param name="bufferRequests">
+        /// The default WebAPI formatters perform synchronous I/O when reading to the request. 
+        /// This has poor performance characteristics with ASP.NET Core apps and may result
+        /// in application deadlocks. This option forces ASP.NET Core to buffer requests preventing this scenario.
+        /// </param>
         /// <returns>The application builder.</returns>
-        public static IApplicationBuilder UseWebApi(this IApplicationBuilder builder, HttpServer httpServer)
+        public static IApplicationBuilder UseWebApi(this IApplicationBuilder builder, HttpServer httpServer, bool bufferRequests = true)
         {
             if (builder == null)
             {
@@ -68,7 +75,7 @@ namespace System.Web.Http.AspNetCore
             HttpConfiguration configuration = httpServer.Configuration;
             Contract.Assert(configuration != null);
 
-            HttpMessageHandlerOptions options = CreateOptions(builder, httpServer, configuration);
+            HttpMessageHandlerOptions options = CreateOptions(builder, httpServer, configuration, bufferRequests);
             return UseMessageHandler(builder, options);
         }
 
@@ -81,7 +88,7 @@ namespace System.Web.Http.AspNetCore
         }
 
         private static HttpMessageHandlerOptions CreateOptions(IApplicationBuilder builder, HttpServer server,
-            HttpConfiguration configuration)
+            HttpConfiguration configuration, bool bufferRequests)
         {
             Contract.Assert(builder != null);
             Contract.Assert(server != null);
@@ -91,7 +98,7 @@ namespace System.Web.Http.AspNetCore
             Contract.Assert(services != null);
 
             IHostBufferPolicySelector bufferPolicySelector = services.GetHostBufferPolicySelector()
-                ?? _defaultBufferPolicySelector;
+                ?? new AspNetCoreBufferPolicySelector(bufferRequests);
             IExceptionLogger exceptionLogger = ExceptionServices.GetLogger(services);
             IExceptionHandler exceptionHandler = ExceptionServices.GetHandler(services);
 
