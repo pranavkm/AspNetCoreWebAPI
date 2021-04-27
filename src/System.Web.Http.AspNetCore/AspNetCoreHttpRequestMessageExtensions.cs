@@ -20,55 +20,32 @@ namespace System.Net.Http
             return (HttpContext)request.Properties[HttpContextKey];
         }
 
-        public static HttpRequestMessage ToHttpRequestMessage(this HttpContext httpContext)
+        public static HttpRequestMessage CreateRequestMessage(IOwinRequest owinRequest, HttpContent requestContent)
         {
-            var httpRequest = httpContext.Request;
-            HttpContent requestContent;
-            if (httpContext.Items.TryGetValue(RequestContentKey, out var stashedContentObject))
-            {
-                var stashedValue = (StashedHttpContent)stashedContentObject;
-
-                if (httpContext.Request.Body.GetHashCode() != stashedValue.OriginalBodyHash)
-                {
-                    throw new NotSupportedException("Changing the body once it has been initialized is not supported.");
-                }
-
-                requestContent = stashedValue.HttpContent;
-            }
-            else
-            {
-                requestContent = CreateStreamedRequestContent(httpRequest);
-            }
-
             // Create the request
-            var uriBuilder = new UriBuilder
-            {
-                Scheme = httpRequest.Scheme,
-                Host = httpRequest.Host.Host,
-                Port = httpRequest.Host.Port.GetValueOrDefault(80),
-                Path = httpRequest.PathBase.Add(httpRequest.Path),
-                Query = httpRequest.QueryString.Value
-            };
-            HttpRequestMessage request = new HttpRequestMessage(new HttpMethod(httpRequest.Method), uriBuilder.Uri);
+            HttpRequestMessage request = new HttpRequestMessage(new HttpMethod(owinRequest.Method), owinRequest.Uri);
 
             try
             {
                 // Set the body
                 request.Content = requestContent;
 
-                CopyHeaders(httpRequest, request);
+                // Copy the headers
+                foreach (KeyValuePair<string, string[]> header in owinRequest.Headers)
+                {
+                    if (!request.Headers.TryAddWithoutValidation(header.Key, header.Value))
+                    {
+                        bool success = requestContent.Headers.TryAddWithoutValidation(header.Key, header.Value);
+                        Contract.Assert(success,
+                            "Every header can be added either to the request headers or to the content headers");
+                    }
+                }
             }
             catch
             {
                 request.Dispose();
                 throw;
             }
-
-            // Set a request context on the request that lazily populates each property.
-            HttpRequestContext requestContext = new AspNetCoreHttpRequestContext(httpContext, request);
-            request.SetRequestContext(requestContext);
-
-            request.Properties[HttpContextKey] = httpContext;
 
             return request;
         }
@@ -99,7 +76,7 @@ namespace System.Net.Http
             if (httpResponse.StatusCode != 0)
             {
                 responseMessage.StatusCode = (HttpStatusCode)httpResponse.StatusCode;
-            }    
+            }
         }
 
         public static void ApplyTo(this HttpRequestMessage requestMessage, HttpContext httpContext)

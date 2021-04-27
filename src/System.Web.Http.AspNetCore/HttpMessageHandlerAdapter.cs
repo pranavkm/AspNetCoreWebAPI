@@ -1,15 +1,11 @@
 ﻿// Copyright (c) .NET Foundation. All rights reserved.
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
-using Microsoft.AspNetCore.Http;
-using Microsoft.AspNetCore.Http.Features;
-using Microsoft.AspNetCore.WebUtilities;
-using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Primitives;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Diagnostics.Contracts;
-using System.Linq;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -17,67 +13,180 @@ using System.Runtime.ExceptionServices;
 using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Web.Http.Controllers;
 using System.Web.Http.ExceptionHandling;
 using System.Web.Http.Hosting;
+using System.Web.Http.Owin.ExceptionHandling;
+using System.Web.Http.Owin.Properties;
+using Microsoft.Owin;
 
-namespace System.Web.Http.AspNetCore
+namespace System.Web.Http.Owin
 {
-    public class HttpMessageHandlerAdapter : IDisposable
+    /// <summary>
+    /// Represents an OWIN component that submits requests to an <see cref="HttpMessageHandler"/> when invoked.
+    /// </summary>
+    public class HttpMessageHandlerAdapter : OwinMiddleware, IDisposable
     {
-        private readonly RequestDelegate _next;
         private readonly HttpMessageHandler _messageHandler;
         private readonly HttpMessageInvoker _messageInvoker;
         private readonly IHostBufferPolicySelector _bufferPolicySelector;
         private readonly IExceptionLogger _exceptionLogger;
         private readonly IExceptionHandler _exceptionHandler;
+        private readonly CancellationToken _appDisposing;
 
         private bool _disposed;
 
-        public HttpMessageHandlerAdapter(RequestDelegate next, HttpMessageHandlerOptions options, IHostApplicationLifetime applicationLifetime)
+        /// <summary>Initializes a new instance of the <see cref="HttpMessageHandlerAdapter"/> class.</summary>
+        /// <param name="next">The next component in the pipeline.</param>
+        /// <param name="options">The options to configure this adapter.</param>
+        public HttpMessageHandlerAdapter(OwinMiddleware next, HttpMessageHandlerOptions options)
+            : base(next)
         {
             if (options == null)
             {
                 throw new ArgumentNullException("options");
             }
 
-            _next = next;
-            _messageHandler = options.MessageHandler ?? throw new ArgumentNullException(nameof(options.MessageHandler));
+            _messageHandler = options.MessageHandler;
+
+            if (_messageHandler == null)
+            {
+                throw new ArgumentException(Error.Format(OwinResources.TypePropertyMustNotBeNull,
+                    typeof(HttpMessageHandlerOptions).Name, "MessageHandler"), "options");
+            }
+
             _messageInvoker = new HttpMessageInvoker(_messageHandler);
-            _bufferPolicySelector = options.BufferPolicySelector ?? throw new ArgumentNullException(nameof(options.BufferPolicySelector));
+            _bufferPolicySelector = options.BufferPolicySelector;
+
+            if (_bufferPolicySelector == null)
+            {
+                throw new ArgumentException(Error.Format(OwinResources.TypePropertyMustNotBeNull,
+                    typeof(HttpMessageHandlerOptions).Name, "BufferPolicySelector"), "options");
+            }
 
             _exceptionLogger = options.ExceptionLogger;
+
+            if (_exceptionLogger == null)
+            {
+                throw new ArgumentException(Error.Format(OwinResources.TypePropertyMustNotBeNull,
+                    typeof(HttpMessageHandlerOptions).Name, "ExceptionLogger"), "options");
+            }
+
             _exceptionHandler = options.ExceptionHandler;
 
-            if (applicationLifetime.ApplicationStopping.CanBeCanceled)
+            if (_exceptionHandler == null)
             {
-                applicationLifetime.ApplicationStopping.Register(OnAppDisposing);
+                throw new ArgumentException(Error.Format(OwinResources.TypePropertyMustNotBeNull,
+                    typeof(HttpMessageHandlerOptions).Name, "ExceptionHandler"), "options");
+            }
+
+            _appDisposing = options.AppDisposing;
+
+            if (_appDisposing.CanBeCanceled)
+            {
+                _appDisposing.Register(OnAppDisposing);
             }
         }
 
-        public async Task Invoke(HttpContext httpContext)
+        /// <summary>Initializes a new instance of the <see cref="HttpMessageHandlerAdapter"/> class.</summary>
+        /// <param name="next">The next component in the pipeline.</param>
+        /// <param name="messageHandler">The <see cref="HttpMessageHandler"/> to submit requests to.</param>
+        /// <param name="bufferPolicySelector">
+        /// The <see cref="IHostBufferPolicySelector"/> that determines whether or not to buffer requests and
+        /// responses.
+        /// </param>
+        /// <remarks>
+        /// This constructor is retained for backwards compatibility. The constructor taking
+        /// <see cref="HttpMessageHandlerOptions"/> should be used instead.
+        /// </remarks>
+        [Obsolete("Use the HttpMessageHandlerAdapter(OwinMiddleware, HttpMessageHandlerOptions) constructor instead.")]
+        public HttpMessageHandlerAdapter(OwinMiddleware next, HttpMessageHandler messageHandler,
+            IHostBufferPolicySelector bufferPolicySelector)
+            : this(next, CreateOptions(messageHandler, bufferPolicySelector))
         {
-            if (httpContext == null)
+        }
+
+        /// <summary>Gets the <see cref="HttpMessageHandler"/> to submit requests to.</summary>
+        public HttpMessageHandler MessageHandler
+        {
+            get { return _messageHandler; }
+        }
+
+        /// <summary>
+        /// Gets the <see cref="IHostBufferPolicySelector"/> that determines whether or not to buffer requests and
+        /// responses.
+        /// </summary>
+        public IHostBufferPolicySelector BufferPolicySelector
+        {
+            get { return _bufferPolicySelector; }
+        }
+
+        /// <summary>Gets the <see cref="IExceptionLogger"/> to use to log unhandled exceptions.</summary>
+        public IExceptionLogger ExceptionLogger
+        {
+            get { return _exceptionLogger; }
+        }
+
+        /// <summary>Gets the <see cref="IExceptionHandler"/> to use to process unhandled exceptions.</summary>
+        public IExceptionHandler ExceptionHandler
+        {
+            get { return _exceptionHandler; }
+        }
+
+        /// <summary>Gets the <see cref="CancellationToken"/> that triggers cleanup of this component.</summary>
+        public CancellationToken AppDisposing
+        {
+            get { return _appDisposing; }
+        }
+
+        /// <inheritdoc />
+        public override Task Invoke(IOwinContext context)
+        {
+            if (context == null)
             {
                 throw new ArgumentNullException("context");
             }
 
-            CancellationToken cancellationToken = httpContext.RequestAborted;
-            var httpRequest = httpContext.Request;
-            var httpResponse = httpContext.Response;
+            IOwinRequest owinRequest = context.Request;
+            IOwinResponse owinResponse = context.Response;
 
-            var bufferInput = _bufferPolicySelector.UseBufferedInputStream(hostContext: httpContext);
-            
-            if (bufferInput)
+            if (owinRequest == null)
             {
-                if (!httpRequest.Body.CanSeek)
-                {
-                    httpRequest.EnableBuffering();
-                    await httpRequest.Body.DrainAsync(cancellationToken);
-                }
+                throw Error.InvalidOperation(OwinResources.OwinContext_NullRequest);
+            }
+            if (owinResponse == null)
+            {
+                throw Error.InvalidOperation(OwinResources.OwinContext_NullResponse);
             }
 
-            var request = httpContext.ToHttpRequestMessage();
-            SetPrincipal(httpContext.User);
+            return InvokeCore(context, owinRequest, owinResponse);
+        }
+
+        private async Task InvokeCore(IOwinContext context, IOwinRequest owinRequest, IOwinResponse owinResponse)
+        {
+            CancellationToken cancellationToken = owinRequest.CallCancelled;
+            HttpContent requestContent;
+
+            bool bufferInput = _bufferPolicySelector.UseBufferedInputStream(hostContext: context);
+
+            if (!bufferInput)
+            {
+                owinRequest.DisableBuffering();
+            }
+
+            if (!owinRequest.Body.CanSeek && bufferInput)
+            {
+                requestContent = await CreateBufferedRequestContentAsync(owinRequest, cancellationToken);
+            }
+            else
+            {
+                requestContent = CreateStreamedRequestContent(owinRequest);
+            }
+
+            HttpRequestMessage request = AspNetCoreHttpRequestMessageExtensions.CreateRequestMessage(owinRequest, requestContent);
+            MapRequestProperties(request, context);
+
+            SetPrincipal(owinRequest.User);
 
             HttpResponseMessage response = null;
             bool callNext;
@@ -89,7 +198,7 @@ namespace System.Web.Http.AspNetCore
                 // Handle null responses
                 if (response == null)
                 {
-                    throw new InvalidOperationException("The message handler did not return a response message.");
+                    throw Error.InvalidOperation(OwinResources.SendAsync_ReturnedNull);
                 }
 
                 // Handle soft 404s where no route matched - call the next component
@@ -104,23 +213,23 @@ namespace System.Web.Http.AspNetCore
                     // Compute Content-Length before calling UseBufferedOutputStream because the default implementation
                     // accesses that header and we want to catch any exceptions calling TryComputeLength here.
 
-                    if (response.Content == null || await ComputeContentLengthAsync(request, response, httpResponse, cancellationToken))
+                    if (response.Content == null
+                        || await ComputeContentLengthAsync(request, response, owinResponse, cancellationToken))
                     {
-                        var bufferOutput = _bufferPolicySelector.UseBufferedOutputStream(response);
+                        bool bufferOutput = _bufferPolicySelector.UseBufferedOutputStream(response);
 
                         if (!bufferOutput)
                         {
-                            var responseBodyFeature = httpContext.Features.Get<IHttpResponseBodyFeature>();
-                            responseBodyFeature?.DisableBuffering();
+                            owinResponse.DisableBuffering();
                         }
                         else if (response.Content != null)
                         {
                             response = await BufferResponseContentAsync(request, response, cancellationToken);
                         }
 
-                        if (await PrepareHeadersAsync(request, response, httpResponse, cancellationToken))
+                        if (await PrepareHeadersAsync(request, response, owinResponse, cancellationToken))
                         {
-                            await SendResponseMessageAsync(request, response, httpContext, cancellationToken);
+                            await SendResponseMessageAsync(request, response, owinResponse, cancellationToken);
                         }
                     }
                 }
@@ -136,10 +245,62 @@ namespace System.Web.Http.AspNetCore
             }
 
             // Call the next component if no route matched
-            if (callNext)
+            if (callNext && Next != null)
             {
-                await _next(httpContext);
+                await Next.Invoke(context);
             }
+        }
+
+        private static HttpContent CreateStreamedRequestContent(IOwinRequest owinRequest)
+        {
+            // Note that we must NOT dispose owinRequest.Body in this case. Disposing it would close the input
+            // stream and prevent cascaded components from accessing it. The server MUST handle any necessary
+            // cleanup upon request completion. NonOwnedStream prevents StreamContent (or its callers including
+            // HttpRequestMessage) from calling Close or Dispose on owinRequest.Body.
+            return new StreamContent(new NonOwnedStream(owinRequest.Body));
+        }
+
+        private static async Task<HttpContent> CreateBufferedRequestContentAsync(IOwinRequest owinRequest,
+            CancellationToken cancellationToken)
+        {
+            // We need to replace the request body with a buffered stream so that other components can read the stream.
+            // For this stream to be useful, it must NOT be diposed along with the request. Streams created by
+            // StreamContent do get disposed along with the request, so use MemoryStream to buffer separately.
+            MemoryStream buffer;
+            int? contentLength = owinRequest.GetContentLength();
+
+            if (!contentLength.HasValue)
+            {
+                buffer = new MemoryStream();
+            }
+            else
+            {
+                buffer = new MemoryStream(contentLength.Value);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+
+            using (StreamContent copier = new StreamContent(owinRequest.Body))
+            {
+                await copier.CopyToAsync(buffer);
+            }
+
+            // Provide the non-disposing, buffered stream to later OWIN components (set to the stream's beginning).
+            buffer.Position = 0;
+            owinRequest.Body = buffer;
+
+            // For MemoryStream, Length is guaranteed to be an int.
+            return new ByteArrayContent(buffer.GetBuffer(), 0, (int)buffer.Length);
+        }
+
+        private static void MapRequestProperties(HttpRequestMessage request, IOwinContext context)
+        {
+            // Set the OWIN context on the request
+            request.SetOwinContext(context);
+
+            // Set a request context on the request that lazily populates each property.
+            HttpRequestContext requestContext = new OwinHttpRequestContext(context, request);
+            request.SetRequestContext(requestContext);
         }
 
         private static void SetPrincipal(IPrincipal user)
@@ -154,8 +315,9 @@ namespace System.Web.Http.AspNetCore
         {
             if (response.StatusCode == HttpStatusCode.NotFound)
             {
-                if (request.Properties.TryGetValue(HttpPropertyKeys.NoRouteMatched, out var notFound)
-                    && (bool)notFound)
+                bool routingFailure;
+                if (request.Properties.TryGetValue<bool>(HttpPropertyKeys.NoRouteMatched, out routingFailure)
+                    && routingFailure)
                 {
                     return true;
                 }
@@ -191,7 +353,7 @@ namespace System.Web.Http.AspNetCore
             Debug.Assert(exceptionInfo.SourceException != null);
 
             ExceptionContext exceptionContext = new ExceptionContext(exceptionInfo.SourceException,
-                AspNetCoreExceptionCatchBlocks.HttpMessageHandlerAdapterBufferContent, request, response);
+                OwinExceptionCatchBlocks.HttpMessageHandlerAdapterBufferContent, request, response);
 
             await _exceptionLogger.LogAsync(exceptionContext, cancellationToken);
             HttpResponseMessage errorResponse = await _exceptionHandler.HandleAsync(exceptionContext,
@@ -232,7 +394,7 @@ namespace System.Web.Http.AspNetCore
             // can do is to log that exception and send back an empty 500.
 
             ExceptionContext errorExceptionContext = new ExceptionContext(errorException,
-                AspNetCoreExceptionCatchBlocks.HttpMessageHandlerAdapterBufferError, request, response);
+                OwinExceptionCatchBlocks.HttpMessageHandlerAdapterBufferError, request, response);
             await _exceptionLogger.LogAsync(errorExceptionContext, cancellationToken);
 
             response.Dispose();
@@ -240,10 +402,12 @@ namespace System.Web.Http.AspNetCore
         }
 
         // Prepares Content-Length and Transfer-Encoding headers.
-        private ValueTask<bool> PrepareHeadersAsync(HttpRequestMessage request, HttpResponseMessage response,
-            HttpResponse httpResponse, CancellationToken cancellationToken)
+        private Task<bool> PrepareHeadersAsync(HttpRequestMessage request, HttpResponseMessage response,
+            IOwinResponse owinResponse, CancellationToken cancellationToken)
         {
+            Contract.Assert(response != null);
             HttpResponseHeaders responseHeaders = response.Headers;
+            Contract.Assert(responseHeaders != null);
             HttpContent content = response.Content;
             bool isTransferEncodingChunked = responseHeaders.TransferEncodingChunked == true;
             HttpHeaderValueCollection<TransferCodingHeaderValue> transferEncoding = responseHeaders.TransferEncoding;
@@ -266,7 +430,7 @@ namespace System.Web.Http.AspNetCore
                     // Copy the response content headers only after ensuring they are complete.
                     // We ask for Content-Length first because HttpContent lazily computes this header and only
                     // afterwards writes the value into the content headers.
-                    return ComputeContentLengthAsync(request, response, httpResponse, cancellationToken);
+                    return ComputeContentLengthAsync(request, response, owinResponse, cancellationToken);
                 }
             }
 
@@ -275,7 +439,7 @@ namespace System.Web.Http.AspNetCore
             // transmit the current response, since HttpContent is assumed to be unframed; in that case, silently drop
             // the Transfer-Encoding: chunked header).
             // HttpClient sets this header when it receives chunked content, but HttpContent does not include the
-            // frames. The ASP.NET Core contract is to set this header only when writing chunked frames to the stream.
+            // frames. The OWIN contract is to set this header only when writing chunked frames to the stream.
             // A Web API caller who desires custom framing would need to do a different Transfer-Encoding (such as
             // "identity, chunked").
             if (isTransferEncodingChunked && transferEncoding.Count == 1)
@@ -283,14 +447,23 @@ namespace System.Web.Http.AspNetCore
                 transferEncoding.Clear();
             }
 
-            return new ValueTask<bool>(true);
+            return Task.FromResult(true);
         }
 
-        private ValueTask<bool> ComputeContentLengthAsync(HttpRequestMessage request, HttpResponseMessage response,
-            HttpResponse httpResponse, CancellationToken cancellationToken)
+        [SuppressMessage("Microsoft.Performance", "CA1804:RemoveUnusedLocals", MessageId = "unused",
+            Justification = "unused variable necessary to call getter")]
+        [SuppressMessage("Microsoft.Design", "CA1031:DoNotCatchGeneralExceptionTypes",
+            Justification = "Exception is turned into an error response.")]
+        private Task<bool> ComputeContentLengthAsync(HttpRequestMessage request, HttpResponseMessage response,
+            IOwinResponse owinResponse, CancellationToken cancellationToken)
         {
+            Contract.Assert(response != null);
+            HttpResponseHeaders responseHeaders = response.Headers;
+            Contract.Assert(responseHeaders != null);
             HttpContent content = response.Content;
+            Contract.Assert(content != null);
             HttpContentHeaders contentHeaders = content.Headers;
+            Contract.Assert(contentHeaders != null);
 
             Exception exception;
 
@@ -298,82 +471,81 @@ namespace System.Web.Http.AspNetCore
             {
                 var unused = contentHeaders.ContentLength;
 
-                return new ValueTask<bool>(true);
+                return Task.FromResult(true);
             }
             catch (Exception ex)
             {
                 exception = ex;
             }
 
-            return HandleTryComputeLengthExceptionAsync(exception, request, response, httpResponse, cancellationToken);
+            return HandleTryComputeLengthExceptionAsync(exception, request, response, owinResponse, cancellationToken);
         }
 
-        private async ValueTask<bool> HandleTryComputeLengthExceptionAsync(Exception exception, HttpRequestMessage request,
-            HttpResponseMessage response, HttpResponse httpResponse, CancellationToken cancellationToken)
+        private async Task<bool> HandleTryComputeLengthExceptionAsync(Exception exception, HttpRequestMessage request,
+            HttpResponseMessage response, IOwinResponse owinResponse, CancellationToken cancellationToken)
         {
-            Contract.Assert(httpResponse != null);
+            Contract.Assert(owinResponse != null);
 
             ExceptionContext exceptionContext = new ExceptionContext(exception,
-                AspNetCoreExceptionCatchBlocks.HttpMessageHandlerAdapterComputeContentLength, request, response);
+                OwinExceptionCatchBlocks.HttpMessageHandlerAdapterComputeContentLength, request, response);
             await _exceptionLogger.LogAsync(exceptionContext, cancellationToken);
 
             // Send back an empty error response if TryComputeLength throws.
-            httpResponse.StatusCode = (int)HttpStatusCode.InternalServerError;
-            SetHeadersForEmptyResponse(httpResponse);
+            owinResponse.StatusCode = (int)HttpStatusCode.InternalServerError;
+            SetHeadersForEmptyResponse(owinResponse.Headers);
             return false;
         }
 
         private Task SendResponseMessageAsync(HttpRequestMessage request, HttpResponseMessage response,
-            HttpContext httpContext, CancellationToken cancellationToken)
+            IOwinResponse owinResponse, CancellationToken cancellationToken)
         {
-            var httpResponse = httpContext.Response;
-            httpResponse.StatusCode = (int)response.StatusCode;
-            var feature = httpContext.Features.Get<IHttpResponseFeature>();
-            if (feature != null)
-            {
-                feature.ReasonPhrase = response.ReasonPhrase;
-            }
+            owinResponse.StatusCode = (int)response.StatusCode;
+            owinResponse.ReasonPhrase = response.ReasonPhrase;
 
             // Copy non-content headers
-            var responseHeaders = httpResponse.Headers;
-            foreach (var header in response.Headers)
+            IDictionary<string, string[]> responseHeaders = owinResponse.Headers;
+            foreach (KeyValuePair<string, IEnumerable<string>> header in response.Headers)
             {
-                responseHeaders[header.Key] = new StringValues(header.Value.ToArray());
+                responseHeaders[header.Key] = header.Value.AsArray();
             }
 
             HttpContent responseContent = response.Content;
             if (responseContent == null)
             {
-                SetHeadersForEmptyResponse(httpResponse);
-                return Task.CompletedTask;
+                SetHeadersForEmptyResponse(responseHeaders);
+                return TaskHelpers.Completed();
             }
             else
             {
                 // Copy content headers
                 foreach (KeyValuePair<string, IEnumerable<string>> contentHeader in responseContent.Headers)
                 {
-                    responseHeaders[contentHeader.Key] = contentHeader.Value.ToArray();
+                    responseHeaders[contentHeader.Key] = contentHeader.Value.AsArray();
                 }
 
                 // Copy body
-                return SendResponseContentAsync(request, response, httpContext, cancellationToken);
+                return SendResponseContentAsync(request, response, owinResponse, cancellationToken);
             }
         }
 
-        private static void SetHeadersForEmptyResponse(HttpResponse httpResponse)
+        private static void SetHeadersForEmptyResponse(IDictionary<string, string[]> headers)
         {
             // Set the content-length to 0 to prevent the server from sending back the response chunked
-            httpResponse.ContentLength = 0;
+            headers["Content-Length"] = new string[] { "0" };
         }
 
         private async Task SendResponseContentAsync(HttpRequestMessage request, HttpResponseMessage response,
-            HttpContext httpContext, CancellationToken cancellationToken)
+            IOwinResponse owinResponse, CancellationToken cancellationToken)
         {
+            Contract.Assert(response != null);
+            Contract.Assert(response.Content != null);
+
+            Exception exception;
             cancellationToken.ThrowIfCancellationRequested();
-            var httpResponse = httpContext.Response;
+
             try
             {
-                await response.Content.CopyToAsync(httpResponse.Body);
+                await response.Content.CopyToAsync(owinResponse.Body);
                 return;
             }
             catch (OperationCanceledException)
@@ -383,14 +555,49 @@ namespace System.Web.Http.AspNetCore
             }
             catch (Exception ex)
             {
-                // We're streaming content, so we can only call loggers, not handlers, as we've already (possibly) send the
-                // status code and headers across the wire. Log the exception.
-                ExceptionContext exceptionContext = new ExceptionContext(ex,
-                    AspNetCoreExceptionCatchBlocks.HttpMessageHandlerAdapterStreamContent, request, response);
-                await _exceptionLogger.LogAsync(exceptionContext, cancellationToken);
-
-                throw;
+                exception = ex;
             }
+
+            // We're streaming content, so we can only call loggers, not handlers, as we've already (possibly) send the
+            // status code and headers across the wire. Log the exception, but then just abort.
+            ExceptionContext exceptionContext = new ExceptionContext(exception,
+                OwinExceptionCatchBlocks.HttpMessageHandlerAdapterStreamContent, request, response);
+            await _exceptionLogger.LogAsync(exceptionContext, cancellationToken);
+            await AbortResponseAsync();
+        }
+
+        private static Task AbortResponseAsync()
+        {
+            // OWIN doesn't yet support an explicit Abort event. Returning a canceled task is the best contract at the
+            // moment.
+            return TaskHelpers.Canceled();
+        }
+
+        // Provides HttpMessageHandlerOptions for callers using the old constructor.
+        private static HttpMessageHandlerOptions CreateOptions(HttpMessageHandler messageHandler,
+            IHostBufferPolicySelector bufferPolicySelector)
+        {
+            if (messageHandler == null)
+            {
+                throw new ArgumentNullException("messageHandler");
+            }
+
+            if (bufferPolicySelector == null)
+            {
+                throw new ArgumentNullException("bufferPolicySelector");
+            }
+
+            // Callers using the old constructor get the default exception handler, no exception logging support, and no
+            // app cleanup support.
+
+            return new HttpMessageHandlerOptions
+            {
+                MessageHandler = messageHandler,
+                BufferPolicySelector = bufferPolicySelector,
+                ExceptionLogger = new EmptyExceptionLogger(),
+                ExceptionHandler = new DefaultExceptionHandler(),
+                AppDisposing = CancellationToken.None
+            };
         }
 
         /// <summary>
